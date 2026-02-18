@@ -10,11 +10,9 @@
 #define BUZZER_PIN  25
 
 // ---------------- DEVICE POLARITY ----------------
-// Relay is ACTIVE LOW
 #define RELAY_ON    LOW
 #define RELAY_OFF   HIGH
 
-// Buzzer is ACTIVE HIGH
 #define BUZZER_ON   HIGH
 #define BUZZER_OFF  LOW
 
@@ -28,7 +26,7 @@ void setup() {
   delay(1000);
 
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, RELAY_OFF);   // Safe default
+  digitalWrite(RELAY_PIN, RELAY_OFF);
 
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, BUZZER_OFF);
@@ -38,7 +36,7 @@ void setup() {
 
   dht.begin();
 
-  Serial.println("Greenhouse Controller - Multi-Sensor Weighted Model");
+  Serial.println("Greenhouse Controller - Evaporation-Based Model");
 }
 
 void loop() {
@@ -57,7 +55,6 @@ void loop() {
     return;
   }
 
-  // ---------------- PRINT RAW VALUES ----------------
   Serial.println("---- Sensor Readings ----");
 
   Serial.print("Temperature: ");
@@ -75,7 +72,8 @@ void loop() {
   Serial.println(light);
 
   // ---------------- NORMALIZATION ----------------
-  // Soil: 3000 (wet) → 0, 4000+ (very dry) → 1
+
+  // Soil: 3000 (wet) → 0, 4000 (dry) → 1
   float soilFactor = (float)(soil - 3000) / 1000.0;
   soilFactor = constrain(soilFactor, 0.0, 1.0);
 
@@ -83,26 +81,39 @@ void loop() {
   float tempFactor = (temp - 20.0) / 20.0;
   tempFactor = constrain(tempFactor, 0.0, 1.0);
 
-  // Light: scale 0–4095 to 0–1
-  float lightFactor = (float)light / 4095.0;
-
-  // Humidity: 0–100% to 0–1
+  // Humidity: 0–100% → 0–1
   float humidityFactor = hum / 100.0;
 
-  // ---------------- WEIGHTS ----------------
-  float Ws = 0.5;   // Soil weight (primary)
-  float Wt = 0.2;   // Temperature weight
-  float Wl = 0.2;   // Light weight
-  float Wh = 0.3;   // Humidity reduction weight
+  // Light: 0–4095 → 0–1
+  float lightFactor = (float)light / 4095.0;
 
-  // ---------------- WATER DEMAND CALCULATION ----------------
+  // ---------------- EVAPORATION MODEL ----------------
+  // Evaporation ∝ Temperature × (1 − Humidity)
+
+  float evaporationFactor = tempFactor * (1.0 - humidityFactor);
+  evaporationFactor = constrain(evaporationFactor, 0.0, 1.0);
+
+  // ---------------- WEIGHTS ----------------
+  float Ws = 0.6;   // Soil (dominant)
+  float We = 0.3;   // Evaporation
+  float Wl = 0.1;   // Light contribution
+
+  // ---------------- WATER DEMAND ----------------
   float waterDemand =
       (soilFactor * Ws)
-    + (tempFactor * Wt)
-    + (lightFactor * Wl)
-    - (humidityFactor * Wh);
+    + (evaporationFactor * We)
+    + (lightFactor * Wl);
 
   waterDemand = constrain(waterDemand, 0.0, 1.0);
+
+  Serial.print("Soil Factor: ");
+  Serial.println(soilFactor);
+
+  Serial.print("Evaporation Factor: ");
+  Serial.println(evaporationFactor);
+
+  Serial.print("Light Factor: ");
+  Serial.println(lightFactor);
 
   Serial.print("Water Demand Score: ");
   Serial.println(waterDemand);
