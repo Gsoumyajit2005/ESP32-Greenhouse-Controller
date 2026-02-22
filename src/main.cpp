@@ -8,7 +8,11 @@
 #define LDR_PIN     35
 #define RELAY_PIN   26
 #define BUZZER_PIN  25
+#define GREEN_LED_PIN 32
+#define RED_LED_PIN   33
 
+#define LED_ON  HIGH
+#define LED_OFF LOW
 // ---------------- DEVICE POLARITY ----------------
 #define RELAY_ON    LOW
 #define RELAY_OFF   HIGH
@@ -19,7 +23,21 @@
 // ---------------- DEMAND THRESHOLD ----------------
 #define DEMAND_THRESHOLD 0.5
 
+// ---------------- HYSTERESIS ----------------
+// To prevent rapid toggling of the pump around the threshold, we can implement a simple hysteresis mechanism.
+// For example, we can define a lower threshold for turning the pump off once it's on.
+#define DEMAND_ON_THRESHOLD 0.55
+#define DEMAND_OFF_THRESHOLD 0.45
+
+// ---------------- MINIMUM RUN TIME ----------------
+// To prevent short cycling of the pump, we can enforce a minimum run time once the pump is turned on.
+#define MIN_PUMP_ON_TIME 10000  // Minimum time (in milliseconds) the pump should run once turned on
+
 DHT dht(DHT_PIN, DHT_TYPE);
+
+// ---------------- STATE VARIABLES ----------------
+bool pumpState = false;          // Current state of the pump (ON/OFF)
+unsigned long pumpStartTime = 0;   // Timestamp when the pump was turned on
 
 void setup() {
   Serial.begin(115200);
@@ -30,6 +48,13 @@ void setup() {
 
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, BUZZER_OFF);
+  
+  pinMode(GREEN_LED_PIN, OUTPUT);
+pinMode(RED_LED_PIN, OUTPUT);
+
+  // Default state: assume pump OFF
+  digitalWrite(GREEN_LED_PIN, LED_ON);
+  digitalWrite(RED_LED_PIN, LED_OFF);
 
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
@@ -118,20 +143,46 @@ void loop() {
   Serial.print("Water Demand Score: ");
   Serial.println(waterDemand);
 
-  // ---------------- DECISION ----------------
-  bool pumpShouldRun = (waterDemand > DEMAND_THRESHOLD);
+  // ---------------- HYSTERESIS + MINIMUM ON TIME ----------------
+unsigned long currentTime = millis();
 
-  if (pumpShouldRun) {
-    Serial.println("High Water Demand → Pump ON");
-    digitalWrite(RELAY_PIN, RELAY_ON);
-    digitalWrite(BUZZER_PIN, BUZZER_ON);
-  } else {
-    Serial.println("Low Water Demand → Pump OFF");
+// Hysteresis logic
+if (!pumpState && waterDemand > DEMAND_ON_THRESHOLD) {
+    pumpState = true;
+    pumpStartTime = currentTime;
+}
+
+if (pumpState && waterDemand < DEMAND_OFF_THRESHOLD) {
+    // Only allow turning OFF if minimum runtime satisfied
+    if (currentTime - pumpStartTime >= MIN_PUMP_ON_TIME) {
+        pumpState = false;
+    }
+}
+
+// Apply output based on pumpState
+if (pumpState) {
+    Serial.println("Pump ON (Robust Mode)");
+
     digitalWrite(RELAY_PIN, RELAY_OFF);
+    digitalWrite(BUZZER_PIN, BUZZER_ON);
+
+    digitalWrite(RED_LED_PIN, LED_ON);
+    digitalWrite(GREEN_LED_PIN, LED_OFF);
+
+} else {
+    Serial.println("Pump OFF (Robust Mode)");
+
+    digitalWrite(RELAY_PIN, RELAY_ON);
     digitalWrite(BUZZER_PIN, BUZZER_OFF);
-  }
+
+    digitalWrite(RED_LED_PIN, LED_OFF);
+    digitalWrite(GREEN_LED_PIN, LED_ON);
+}
 
   Serial.println("-------------------------\n");
 
   delay(3000);
 }
+
+
+
