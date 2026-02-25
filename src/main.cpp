@@ -13,31 +13,23 @@
 
 #define LED_ON  HIGH
 #define LED_OFF LOW
+
 // ---------------- DEVICE POLARITY ----------------
-#define RELAY_ON    LOW
-#define RELAY_OFF   HIGH
+#define RELAY_ON    HIGH
+#define RELAY_OFF   LOW
 
 #define BUZZER_ON   HIGH
 #define BUZZER_OFF  LOW
 
-// ---------------- DEMAND THRESHOLD ----------------
-#define DEMAND_THRESHOLD 0.5
-
-// ---------------- HYSTERESIS ----------------
-// To prevent rapid toggling of the pump around the threshold, we can implement a simple hysteresis mechanism.
-// For example, we can define a lower threshold for turning the pump off once it's on.
-#define DEMAND_ON_THRESHOLD 0.55
-#define DEMAND_OFF_THRESHOLD 0.45
-
-// ---------------- MINIMUM RUN TIME ----------------
-// To prevent short cycling of the pump, we can enforce a minimum run time once the pump is turned on.
-#define MIN_PUMP_ON_TIME 10000  // Minimum time (in milliseconds) the pump should run once turned on
+// ---------------- DAY/NIGHT CONTROL ----------------
+#define LIGHT_DAY_THRESHOLD 0.2
 
 DHT dht(DHT_PIN, DHT_TYPE);
 
 // ---------------- STATE VARIABLES ----------------
-bool pumpState = false;          // Current state of the pump (ON/OFF)
-unsigned long pumpStartTime = 0;   // Timestamp when the pump was turned on
+bool pumpState = false;
+bool burstActive = false;
+unsigned long burstTimer = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -48,11 +40,10 @@ void setup() {
 
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, BUZZER_OFF);
-  
-  pinMode(GREEN_LED_PIN, OUTPUT);
-pinMode(RED_LED_PIN, OUTPUT);
 
-  // Default state: assume pump OFF
+  pinMode(GREEN_LED_PIN, OUTPUT);
+  pinMode(RED_LED_PIN, OUTPUT);
+
   digitalWrite(GREEN_LED_PIN, LED_ON);
   digitalWrite(RED_LED_PIN, LED_OFF);
 
@@ -61,7 +52,7 @@ pinMode(RED_LED_PIN, OUTPUT);
 
   dht.begin();
 
-  Serial.println("Greenhouse Controller - Evaporation-Based Model");
+  Serial.println("Greenhouse Controller - Climate Aware Burst Mode");
 }
 
 void loop() {
@@ -98,38 +89,12 @@ void loop() {
 
   // ---------------- NORMALIZATION ----------------
 
-  // Soil: 3000 (wet) → 0, 4000 (dry) → 1
-  float soilFactor = (float)(soil - 3000) / 1000.0;
-  soilFactor = constrain(soilFactor, 0.0, 1.0);
-
-  // Temperature: 20°C → 0, 40°C → 1
-  float tempFactor = (temp - 20.0) / 20.0;
-  tempFactor = constrain(tempFactor, 0.0, 1.0);
-
-  // Humidity: 0–100% → 0–1
+  float soilFactor = constrain((soil - 3000) / 1000.0, 0.0, 1.0);
+  float tempFactor = constrain((temp - 20.0) / 20.0, 0.0, 1.0);
   float humidityFactor = hum / 100.0;
-
-  // Light: 0–4095 → 0–1
   float lightFactor = (float)light / 4095.0;
 
-  // ---------------- EVAPORATION MODEL ----------------
-  // Evaporation ∝ Temperature × (1 − Humidity)
-
-  float evaporationFactor = tempFactor * (1.0 - humidityFactor);
-  evaporationFactor = constrain(evaporationFactor, 0.0, 1.0);
-
-  // ---------------- WEIGHTS ----------------
-  float Ws = 0.6;   // Soil (dominant)
-  float We = 0.3;   // Evaporation
-  float Wl = 0.1;   // Light contribution
-
-  // ---------------- WATER DEMAND ----------------
-  float waterDemand =
-      (soilFactor * Ws)
-    + (evaporationFactor * We)
-    + (lightFactor * Wl);
-
-  waterDemand = constrain(waterDemand, 0.0, 1.0);
+  float evaporationFactor = constrain(tempFactor * (1.0 - humidityFactor), 0.0, 1.0);
 
   Serial.print("Soil Factor: ");
   Serial.println(soilFactor);
@@ -140,49 +105,73 @@ void loop() {
   Serial.print("Light Factor: ");
   Serial.println(lightFactor);
 
-  Serial.print("Water Demand Score: ");
-  Serial.println(waterDemand);
+  // ---------------- IRRIGATION LOGIC ----------------
 
-  // ---------------- HYSTERESIS + MINIMUM ON TIME ----------------
-unsigned long currentTime = millis();
+  unsigned long currentTime = millis();
 
-// Hysteresis logic
-if (!pumpState && waterDemand > DEMAND_ON_THRESHOLD) {
-    pumpState = true;
-    pumpStartTime = currentTime;
-}
+  bool isDaytime = (lightFactor > LIGHT_DAY_THRESHOLD);
+  bool soilDryEnough = (soilFactor > 0.3);
 
-if (pumpState && waterDemand < DEMAND_OFF_THRESHOLD) {
-    // Only allow turning OFF if minimum runtime satisfied
-    if (currentTime - pumpStartTime >= MIN_PUMP_ON_TIME) {
-        pumpState = false;
-    }
-}
+  Serial.print("Daytime: ");
+  Serial.println(isDaytime ? "YES" : "NO");
 
-// Apply output based on pumpState
-if (pumpState) {
-    Serial.println("Pump ON (Robust Mode)");
+  Serial.print("Soil Dry Enough: ");
+  Serial.println(soilDryEnough ? "YES" : "NO");
 
-    digitalWrite(RELAY_PIN, RELAY_OFF);
-    digitalWrite(BUZZER_PIN, BUZZER_ON);
+  // Dynamic burst timing
+  unsigned long dynamicOffTime = 20000 - (evaporationFactor * 15000); // 5–20 sec
+  unsigned long dynamicOnTime  = 5000;
 
-    digitalWrite(RED_LED_PIN, LED_ON);
-    digitalWrite(GREEN_LED_PIN, LED_OFF);
+  Serial.print("Dynamic OFF Time (ms): ");
+  Serial.println(dynamicOffTime);
 
-} else {
-    Serial.println("Pump OFF (Robust Mode)");
+  bool irrigationAllowed = soilDryEnough && isDaytime;
 
-    digitalWrite(RELAY_PIN, RELAY_ON);
-    digitalWrite(BUZZER_PIN, BUZZER_OFF);
+  if (irrigationAllowed) {
 
-    digitalWrite(RED_LED_PIN, LED_OFF);
-    digitalWrite(GREEN_LED_PIN, LED_ON);
-}
+      if (!burstActive) {
+          burstActive = true;
+          pumpState = true;
+          burstTimer = currentTime;
+      }
+
+      if (pumpState && (currentTime - burstTimer >= dynamicOnTime)) {
+          pumpState = false;
+          burstTimer = currentTime;
+      }
+
+      if (!pumpState && (currentTime - burstTimer >= dynamicOffTime)) {
+          pumpState = true;
+          burstTimer = currentTime;
+      }
+
+  } else {
+      pumpState = false;
+      burstActive = false;
+  }
+
+  Serial.print("Pump State: ");
+  Serial.println(pumpState ? "ON" : "OFF");
+
+  // ---------------- APPLY OUTPUT ----------------
+
+  if (pumpState) {
+      Serial.println("Burst Mode: Pump ON");
+
+      digitalWrite(RELAY_PIN, RELAY_ON);
+      digitalWrite(BUZZER_PIN, BUZZER_ON);
+      digitalWrite(RED_LED_PIN, LED_ON);
+      digitalWrite(GREEN_LED_PIN, LED_OFF);
+  } else {
+      Serial.println("Burst Mode: Pump OFF");
+
+      digitalWrite(RELAY_PIN, RELAY_OFF);
+      digitalWrite(BUZZER_PIN, BUZZER_OFF);
+      digitalWrite(RED_LED_PIN, LED_OFF);
+      digitalWrite(GREEN_LED_PIN, LED_ON);
+  }
 
   Serial.println("-------------------------\n");
 
   delay(3000);
 }
-
-
-
